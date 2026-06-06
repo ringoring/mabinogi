@@ -94,7 +94,7 @@ function submitVote(p) {
 
     // (주차, 캐릭터명) 일치 행이 있으면 갱신(upsert)
     for (var i = 1; i < values.length; i++) {
-      if (String(values[i][0]) === weekId && String(values[i][1]) === p.name) {
+      if (asWeek(values[i][0]) === weekId && String(values[i][1]) === p.name) {
         sh.getRange(i + 1, 1, 1, row.length).setValues([row]);
         return { ok: true };
       }
@@ -128,7 +128,8 @@ function readConfig() {
   var v = sh.getDataRange().getValues();
   for (var i = 1; i < v.length; i++) {
     var key = String(v[i][0] || '').trim();
-    if (key) cfg[key] = String(v[i][1] || '').trim();
+    // 시트가 "21:00" 을 시간값(Date)으로 자동변환해도 HH:mm 글자로 되돌림
+    if (key) cfg[key] = asTime(v[i][1]);
   }
   return cfg;
 }
@@ -141,14 +142,14 @@ function readVotes(weekId) {
   var v = sh.getDataRange().getValues();
   var out = [];
   for (var i = 1; i < v.length; i++) {
-    if (String(v[i][0]) !== weekId) continue;
+    if (asWeek(v[i][0]) !== weekId) continue;   // 주차 칸이 Date로 변환돼도 맞춤
     var name = String(v[i][1] || '').trim();
     if (!name) continue;
     out.push({
       name: name,
       cls: members[name] || '',
       attend: String(v[i][2] || ''),
-      time: String(v[i][3] || ''),
+      time: asTime(v[i][3]),                     // 시간 칸이 Date로 변환돼도 HH:mm
       power: Number(v[i][4]) || 0,
       updatedAt: String(v[i][5] || '')
     });
@@ -187,4 +188,14 @@ function deadlineOf(monday, timeStr) {
 
 function fmt(d, pattern) {
   return Utilities.formatDate(d, TZ, pattern);
+}
+
+/* 시트가 글자를 Date 로 자동변환해도 원래 형식으로 되돌리는 헬퍼 */
+function asWeek(v) {
+  if (v instanceof Date) return fmt(v, 'yyyy-MM-dd');
+  return String(v == null ? '' : v).trim();
+}
+function asTime(v) {
+  if (v instanceof Date) return fmt(v, 'HH:mm');
+  return String(v == null ? '' : v).trim();
 }
