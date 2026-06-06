@@ -55,13 +55,15 @@ function getData() {
   var openAt = atTime(monday, cfg.시작시간);
   var deadline = atTime(monday, cfg.마감시간);
   var now = new Date();
+  var test = isOn(cfg.테스트모드);   // 시트 [설정]에 테스트모드=TRUE 면 시간제한 무시(항상 열림)
 
   return {
     contentDate: weekId,
     openAt: openAt.toISOString(),
     deadline: deadline.toISOString(),
-    notYetOpen: now < openAt,        // 접수 시작 전
-    isClosed: now > deadline,        // 접수 마감 후
+    notYetOpen: test ? false : (now < openAt),   // 접수 시작 전
+    isClosed: test ? false : (now > deadline),   // 접수 마감 후
+    testMode: test,
     defaultTime: cfg.기본시간 || '21:00',
     members: readMembers(),
     votes: readVotes(weekId)
@@ -75,11 +77,13 @@ function submitVote(p) {
   var monday = upcomingMonday();
   var weekId = fmt(monday, 'yyyy-MM-dd');
   var now = new Date();
-  if (now < atTime(monday, cfg.시작시간)) {
-    return { ok: false, error: '아직 접수 시작 전입니다.' };
-  }
-  if (now > atTime(monday, cfg.마감시간)) {
-    return { ok: false, error: '투표가 마감되었습니다.' };
+  if (!isOn(cfg.테스트모드)) {   // 테스트모드면 시간제한 건너뜀
+    if (now < atTime(monday, cfg.시작시간)) {
+      return { ok: false, error: '아직 접수 시작 전입니다.' };
+    }
+    if (now > atTime(monday, cfg.마감시간)) {
+      return { ok: false, error: '투표가 마감되었습니다.' };
+    }
   }
 
   var member = readMembers().filter(function (m) { return m.name === p.name; })[0];
@@ -206,4 +210,10 @@ function asWeek(v) {
 function asTime(v) {
   if (v instanceof Date) return fmt(v, 'HH:mm');
   return String(v == null ? '' : v).trim();
+}
+
+/* 설정값이 '켜짐'인지 (TRUE/ON/Y/1/예/참 등) */
+function isOn(v) {
+  var s = String(v == null ? '' : v).trim().toLowerCase();
+  return ['true', 'on', 'y', 'yes', '1', '예', '참', 'o'].indexOf(s) !== -1;
 }
