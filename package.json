@@ -1,0 +1,9 @@
+{
+  "name": "mabinogi-raid-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "리비 길드 월요일 정기 콘텐츠 신청/투표/파티 분배 (GitHub Pages + Google Sheets)",
+  "scripts": {
+    "test": "node tests/party.test.js"
+  }
+}
