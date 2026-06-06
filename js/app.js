@@ -146,12 +146,14 @@
     var b = buckets();
     var html = '';
 
+    // 9시 정시(21:00 선택자) → 파티 자동 결성
     html += '<div class="card"><h3>9시 정시 파티 <small>(' + b.onTime.length + '명)</small></h3>' +
       partiesHTML(Party.buildParties(b.onTime, CONFIG.PARTY_SIZE)) + '</div>';
 
+    // 9시 이후 → 팀 결성 없이 리스트만 (이름/직업/전투력/시간)
     if (b.later.length) {
-      html += '<div class="card"><h3>9시 이후 파티 <small>(' + b.later.length + '명)</small></h3>' +
-        partiesHTML(Party.buildParties(b.later, CONFIG.PARTY_SIZE)) + '</div>';
+      html += '<div class="card"><h3>9시 이후 <small>(' + b.later.length + '명 · 팀 미결성)</small></h3>' +
+        laterListHTML(b.later) + '</div>';
     }
 
     html += '<div class="card cols">' +
@@ -162,15 +164,18 @@
     return html;
   }
 
-  function partiesHTML(parties) {
+  function memberLi(m) {
+    return '<li><span class="dot ' + m.cat + '"></span>' +
+      '<span class="pname">' + esc(m.name) + '</span>' +
+      '<span class="cls ' + m.cat + '">' + esc(m.cls) + '</span>' +
+      '<span class="pw">' + esc(String(m.power)) + '</span></li>';
+  }
+
+  function partiesHTML(result) {
+    var parties = (result && result.parties) || [];
+    var waiting = (result && result.waiting) || [];
     if (!parties.length) return '<p class="muted">아직 인원이 없습니다.</p>';
-    return '<div class="parties">' + parties.map(function (p, i) {
-      var members = p.members.map(function (m) {
-        return '<li><span class="dot ' + m.cat + '"></span>' +
-          '<span class="pname">' + esc(m.name) + '</span>' +
-          '<span class="cls ' + m.cat + '">' + esc(m.cls) + '</span>' +
-          '<span class="pw">' + esc(String(m.power)) + '</span></li>';
-      }).join('');
+    var html = '<div class="parties">' + parties.map(function (p, i) {
       var hasTank = p.members.some(function (m) { return m.cat === 'tank'; });
       var hasHeal = p.members.some(function (m) { return m.cat === 'heal'; });
       var warn = (!hasTank || !hasHeal)
@@ -179,8 +184,28 @@
       return '<div class="party">' +
         '<div class="party-head">' + (i + 1) + '파티 ' + warn +
         '<span class="ptotal">전투력 ' + p.total.toLocaleString() + '</span></div>' +
-        '<ul class="party-list">' + members + '</ul></div>';
+        '<ul class="party-list">' + p.members.map(memberLi).join('') + '</ul></div>';
     }).join('') + '</div>';
+    if (waiting.length) {
+      html += '<div class="party" style="margin-top:12px;border-style:dashed;">' +
+        '<div class="party-head">⏳ 대기파티 <span class="ptotal">' + waiting.length + '명</span></div>' +
+        '<ul class="party-list">' + waiting.map(memberLi).join('') + '</ul></div>';
+    }
+    return html;
+  }
+
+  function laterListHTML(arr) {
+    if (!arr.length) return '<p class="muted">없음</p>';
+    var rows = arr.slice().sort(function (a, b) {
+      return (a.time || '').localeCompare(b.time || '') || (b.power - a.power);
+    }).map(function (m) {
+      return '<tr><td>' + esc(m.name) + '</td>' +
+        '<td><span class="cls ' + Party.categoryOf(m.cls) + '">' + esc(m.cls) + '</span></td>' +
+        '<td class="num">' + esc(String(m.power)) + '</td>' +
+        '<td><span class="pill on">' + esc(m.time) + '</span></td></tr>';
+    }).join('');
+    return '<table class="tbl"><thead><tr><th>캐릭터</th><th>클래스</th><th>전투력</th><th>시간</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>';
   }
 
   function listColHTML(title, arr, kind) {

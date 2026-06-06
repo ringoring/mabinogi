@@ -52,12 +52,16 @@ function getData() {
   var cfg = readConfig();
   var monday = upcomingMonday();
   var weekId = fmt(monday, 'yyyy-MM-dd');
-  var deadline = deadlineOf(monday, cfg.마감시간);
+  var openAt = atTime(monday, cfg.시작시간);
+  var deadline = atTime(monday, cfg.마감시간);
+  var now = new Date();
 
   return {
     contentDate: weekId,
+    openAt: openAt.toISOString(),
     deadline: deadline.toISOString(),
-    isClosed: new Date() > deadline,
+    notYetOpen: now < openAt,        // 접수 시작 전
+    isClosed: now > deadline,        // 접수 마감 후
     defaultTime: cfg.기본시간 || '21:00',
     members: readMembers(),
     votes: readVotes(weekId)
@@ -70,7 +74,11 @@ function submitVote(p) {
   var cfg = readConfig();
   var monday = upcomingMonday();
   var weekId = fmt(monday, 'yyyy-MM-dd');
-  if (new Date() > deadlineOf(monday, cfg.마감시간)) {
+  var now = new Date();
+  if (now < atTime(monday, cfg.시작시간)) {
+    return { ok: false, error: '아직 접수 시작 전입니다.' };
+  }
+  if (now > atTime(monday, cfg.마감시간)) {
     return { ok: false, error: '투표가 마감되었습니다.' };
   }
 
@@ -123,7 +131,7 @@ function readMembers() {
 
 function readConfig() {
   var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_CONFIG);
-  var cfg = { 기본시간: '21:00', 마감시간: '21:00' };
+  var cfg = { 기본시간: '21:00', 시작시간: '08:00', 마감시간: '20:30' };
   if (!sh) return cfg;
   var v = sh.getDataRange().getValues();
   for (var i = 1; i < v.length; i++) {
@@ -179,10 +187,10 @@ function upcomingMonday() {
   return d;
 }
 
-function deadlineOf(monday, timeStr) {
-  var parts = String(timeStr || '21:00').split(':');
+function atTime(monday, timeStr) {
+  var parts = String(timeStr || '00:00').split(':');
   var d = new Date(monday);
-  d.setHours(parseInt(parts[0], 10) || 21, parseInt(parts[1], 10) || 0, 0, 0);
+  d.setHours(parseInt(parts[0], 10) || 0, parseInt(parts[1], 10) || 0, 0, 0);
   return d;
 }
 

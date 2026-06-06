@@ -39,9 +39,10 @@ window.CONFIG = {
     });
 
     var n = list.length;
-    if (n === 0) return [];
+    if (n === 0) return { parties: [], waiting: [] };
 
-    var numParties = Math.ceil(n / partySize);
+    // 4명 꽉 찬 파티 우선. 딱 안 떨어지면 나머지는 대기파티로. (4명 미만이면 파티 1개)
+    var numParties = Math.floor(n / partySize) || 1;
     var parties = [];
     for (var i = 0; i < numParties; i++) parties.push({ members: [], total: 0 });
 
@@ -49,51 +50,55 @@ window.CONFIG = {
     var heals = list.filter(function (m) { return m.cat === 'heal'; }).sort(byPowerDesc);
     var dealers = list.filter(function (m) { return m.cat === 'dealer'; }).sort(byPowerDesc);
 
-    function add(p, m) {
-      p.members.push(m);
-      p.total += m.power;
-    }
-    function hasSupport(p) {
-      return p.members.some(function (m) { return m.cat === 'tank' || m.cat === 'heal'; });
-    }
-    function hasCat(p, cat) {
-      return p.members.some(function (m) { return m.cat === cat; });
-    }
+    function add(p, m) { p.members.push(m); p.total += m.power; }
+    function hasCat(p, cat) { return p.members.some(function (m) { return m.cat === cat; }); }
+    function hasSupport(p) { return hasCat(p, 'tank') || hasCat(p, 'heal'); }
 
-    // 1) 각 파티에 탱커 1명씩 골고루 (전투력 높은 순)
-    var ti = 0;
-    for (var p1 = 0; p1 < numParties && ti < tanks.length; p1++) {
-      add(parties[p1], tanks[ti++]);
-    }
-
-    // 2) 힐러 분배 — 지원(탱/힐) 없는 파티부터
-    var hi = 0;
-    for (var p2 = 0; p2 < numParties && hi < heals.length; p2++) {
-      if (!hasSupport(parties[p2])) add(parties[p2], heals[hi++]);
-    }
-    // 2-b) 남은 힐러는 탱커만 있고 힐러 없는 파티에
-    for (var p3 = 0; p3 < numParties && hi < heals.length; p3++) {
-      if (!hasCat(parties[p3], 'heal') && parties[p3].members.length < partySize) {
-        add(parties[p3], heals[hi++]);
-      }
-    }
-
-    // 3) 남은 인원 전투력 내림차순 풀로
-    var pool = tanks.slice(ti).concat(heals.slice(hi)).concat(dealers).sort(byPowerDesc);
-
-    // 4) 그리디 전투력 균형
-    for (var k = 0; k < pool.length; k++) {
+    // 조건 만족 + 자리 남은 파티 중 전투력 합 최저 (없으면 -1)
+    function pick(ok) {
       var best = -1;
-      for (var pp = 0; pp < numParties; pp++) {
-        if (parties[pp].members.length < partySize) {
-          if (best === -1 || parties[pp].total < parties[best].total) best = pp;
+      for (var i = 0; i < numParties; i++) {
+        var p = parties[i];
+        if (p.members.length < partySize && ok(p)) {
+          if (best === -1 || p.total < parties[best].total) best = i;
         }
       }
-      if (best === -1) break;
-      add(parties[best], pool[k]);
+      return best;
     }
 
-    return parties;
+    var waiting = [];
+
+    // 1) 각 파티에 탱커 1명씩 (전투력 낮은 파티 우선)
+    var ti = 0;
+    for (; ti < tanks.length; ti++) {
+      var t = pick(function (p) { return !hasCat(p, 'tank'); });
+      if (t === -1) break;
+      add(parties[t], tanks[ti]);
+    }
+
+    // 2) 힐러: 지원 없는 파티 우선 → 힐 없는 파티 (둘 다 전투력 낮은 곳)
+    var hi = 0;
+    for (; hi < heals.length; hi++) {
+      var h1 = pick(function (p) { return !hasSupport(p); });
+      if (h1 === -1) break;
+      add(parties[h1], heals[hi]);
+    }
+    for (; hi < heals.length; hi++) {
+      var h2 = pick(function (p) { return !hasCat(p, 'heal'); });
+      if (h2 === -1) break;
+      add(parties[h2], heals[hi]);
+    }
+
+    // 3) 남은 인원 전투력 균형 그리디, 자리 없으면 대기파티
+    var pool = tanks.slice(ti).concat(heals.slice(hi)).concat(dealers).sort(byPowerDesc);
+    for (var k = 0; k < pool.length; k++) {
+      var idx = pick(function () { return true; });
+      if (idx === -1) waiting.push(pool[k]);
+      else add(parties[idx], pool[k]);
+    }
+
+    waiting.sort(byPowerDesc);
+    return { parties: parties, waiting: waiting };
   }
 
   root.Party = {
@@ -182,31 +187,39 @@ window.Api = {
 
   function render() {
     var d = state.data;
+    var openAt = new Date(d.openAt);
     var deadline = new Date(d.deadline);
+    var notYetOpen = d.notYetOpen;
     var closed = d.isClosed;
+    var canVote = !notYetOpen && !closed;
 
     var html = '';
-    html += headerHTML(d, deadline, closed);
+    html += headerHTML(d, openAt, deadline, notYetOpen, closed, canVote);
     html += tabsHTML();
-    html += '<div id="tab-body">' + (state.tab === 'vote' ? voteTabHTML(d, closed) : partyTabHTML()) + '</div>';
+    html += '<div id="tab-body">' + (state.tab === 'vote' ? voteTabHTML(d, notYetOpen, closed, canVote) : partyTabHTML()) + '</div>';
     $('#app').innerHTML = html;
-    bind();
-    if (state.tab === 'vote' && !closed) startCountdown(deadline);
+    bind(canVote);
+    if (state.tab === 'vote') {
+      if (notYetOpen) startCountdown(openAt, '접수 시작까지');   // 시작 시각 도달하면 자동 새로고침
+      else if (!closed) startCountdown(deadline, '마감까지');    // 마감 시각 도달하면 자동 새로고침
+    }
   }
 
-  function headerHTML(d, deadline, closed) {
+  function headerHTML(d, openAt, deadline, notYetOpen, closed, canVote) {
+    var cta = notYetOpen ? '⏳ 접수 시작 전' : (closed ? '🔒 투표 마감' : '신청하기 / 투표 ▸');
+    var line = notYetOpen
+      ? '접수 시작: ' + openAt.toLocaleString('ko-KR')
+      : (closed ? '투표가 마감되었습니다.' : '마감: ' + deadline.toLocaleString('ko-KR'));
     return '' +
       '<header class="hero">' +
       '  <div class="hero-guild">' + esc(CONFIG.GUILD_NAME) + '</div>' +
       '  <h1>' + esc(CONFIG.CONTENT_TITLE) + '</h1>' +
-      '  <button class="banner" id="banner" ' + (closed ? 'disabled' : '') + '>' +
+      '  <button class="banner" id="banner" ' + (canVote ? '' : 'disabled') + '>' +
       '    <span class="banner-label">콘텐츠 날짜</span>' +
       '    <span class="banner-date">' + fmtKDate(d.contentDate) + '</span>' +
-      '    <span class="banner-cta">' + (closed ? '🔒 투표 마감' : '신청하기 / 투표 ▸') + '</span>' +
+      '    <span class="banner-cta">' + cta + '</span>' +
       '  </button>' +
-      '  <div class="deadline" id="deadline-line">' +
-         (closed ? '투표가 마감되었습니다.' : '마감: ' + deadline.toLocaleString('ko-KR')) +
-      '  </div>' +
+      '  <div class="deadline" id="deadline-line">' + line + '</div>' +
       '</header>';
   }
 
@@ -220,7 +233,7 @@ window.Api = {
 
   /* ----- 투표 탭 ----- */
 
-  function voteTabHTML(d, closed) {
+  function voteTabHTML(d, notYetOpen, closed, canVote) {
     var b = buckets();
     var total = d.members.length;
     var voted = total - b.noVote.length;
@@ -237,9 +250,14 @@ window.Api = {
       '  </div>' +
       '</div>';
 
-    var cta = closed
-      ? '<div class="card muted">투표가 마감되어 더 이상 신청할 수 없습니다. “파티 분배” 탭에서 결과를 확인하세요.</div>'
-      : '<div class="card"><button class="primary big" id="open-vote">＋ 내 캐릭터로 신청 / 투표</button></div>';
+    var cta;
+    if (notYetOpen) {
+      cta = '<div class="card muted">아직 접수 시작 전입니다. 매주 월요일 접수 시작 시각에 신청할 수 있습니다.</div>';
+    } else if (closed) {
+      cta = '<div class="card muted">투표가 마감되어 더 이상 신청할 수 없습니다. “파티 분배” 탭에서 결과를 확인하세요.</div>';
+    } else {
+      cta = '<div class="card"><button class="primary big" id="open-vote">＋ 내 캐릭터로 신청 / 투표</button></div>';
+    }
 
     return summary + cta + recentVotesHTML(d);
   }
@@ -267,12 +285,14 @@ window.Api = {
     var b = buckets();
     var html = '';
 
+    // 9시 정시(21:00 선택자) → 파티 자동 결성
     html += '<div class="card"><h3>9시 정시 파티 <small>(' + b.onTime.length + '명)</small></h3>' +
       partiesHTML(Party.buildParties(b.onTime, CONFIG.PARTY_SIZE)) + '</div>';
 
+    // 9시 이후 → 팀 결성 없이 리스트만 (이름/직업/전투력/시간)
     if (b.later.length) {
-      html += '<div class="card"><h3>9시 이후 파티 <small>(' + b.later.length + '명)</small></h3>' +
-        partiesHTML(Party.buildParties(b.later, CONFIG.PARTY_SIZE)) + '</div>';
+      html += '<div class="card"><h3>9시 이후 <small>(' + b.later.length + '명 · 팀 미결성)</small></h3>' +
+        laterListHTML(b.later) + '</div>';
     }
 
     html += '<div class="card cols">' +
@@ -283,15 +303,18 @@ window.Api = {
     return html;
   }
 
-  function partiesHTML(parties) {
+  function memberLi(m) {
+    return '<li><span class="dot ' + m.cat + '"></span>' +
+      '<span class="pname">' + esc(m.name) + '</span>' +
+      '<span class="cls ' + m.cat + '">' + esc(m.cls) + '</span>' +
+      '<span class="pw">' + esc(String(m.power)) + '</span></li>';
+  }
+
+  function partiesHTML(result) {
+    var parties = (result && result.parties) || [];
+    var waiting = (result && result.waiting) || [];
     if (!parties.length) return '<p class="muted">아직 인원이 없습니다.</p>';
-    return '<div class="parties">' + parties.map(function (p, i) {
-      var members = p.members.map(function (m) {
-        return '<li><span class="dot ' + m.cat + '"></span>' +
-          '<span class="pname">' + esc(m.name) + '</span>' +
-          '<span class="cls ' + m.cat + '">' + esc(m.cls) + '</span>' +
-          '<span class="pw">' + esc(String(m.power)) + '</span></li>';
-      }).join('');
+    var html = '<div class="parties">' + parties.map(function (p, i) {
       var hasTank = p.members.some(function (m) { return m.cat === 'tank'; });
       var hasHeal = p.members.some(function (m) { return m.cat === 'heal'; });
       var warn = (!hasTank || !hasHeal)
@@ -300,8 +323,28 @@ window.Api = {
       return '<div class="party">' +
         '<div class="party-head">' + (i + 1) + '파티 ' + warn +
         '<span class="ptotal">전투력 ' + p.total.toLocaleString() + '</span></div>' +
-        '<ul class="party-list">' + members + '</ul></div>';
+        '<ul class="party-list">' + p.members.map(memberLi).join('') + '</ul></div>';
     }).join('') + '</div>';
+    if (waiting.length) {
+      html += '<div class="party" style="margin-top:12px;border-style:dashed;">' +
+        '<div class="party-head">⏳ 대기파티 <span class="ptotal">' + waiting.length + '명</span></div>' +
+        '<ul class="party-list">' + waiting.map(memberLi).join('') + '</ul></div>';
+    }
+    return html;
+  }
+
+  function laterListHTML(arr) {
+    if (!arr.length) return '<p class="muted">없음</p>';
+    var rows = arr.slice().sort(function (a, b) {
+      return (a.time || '').localeCompare(b.time || '') || (b.power - a.power);
+    }).map(function (m) {
+      return '<tr><td>' + esc(m.name) + '</td>' +
+        '<td><span class="cls ' + Party.categoryOf(m.cls) + '">' + esc(m.cls) + '</span></td>' +
+        '<td class="num">' + esc(String(m.power)) + '</td>' +
+        '<td><span class="pill on">' + esc(m.time) + '</span></td></tr>';
+    }).join('');
+    return '<table class="tbl"><thead><tr><th>캐릭터</th><th>클래스</th><th>전투력</th><th>시간</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>';
   }
 
   function listColHTML(title, arr, kind) {
@@ -420,17 +463,17 @@ window.Api = {
   /* ---------- 카운트다운 ---------- */
 
   var countdownTimer = null;
-  function startCountdown(deadline) {
+  function startCountdown(target, label) {
     if (countdownTimer) clearInterval(countdownTimer);
     function tick() {
       var line = $('#deadline-line');
       if (!line) { clearInterval(countdownTimer); return; }
-      var ms = deadline - new Date();
-      if (ms <= 0) { clearInterval(countdownTimer); load(); return; }
+      var ms = target - new Date();
+      if (ms <= 0) { clearInterval(countdownTimer); load(); return; }  // 시작/마감 시각 도달 → 상태 갱신
       var h = Math.floor(ms / 3600000);
       var m = Math.floor((ms % 3600000) / 60000);
       var s = Math.floor((ms % 60000) / 1000);
-      line.innerHTML = '마감까지 <b>' + h + '시간 ' + m + '분 ' + s + '초</b> · ' + deadline.toLocaleString('ko-KR');
+      line.innerHTML = label + ' <b>' + h + '시간 ' + m + '분 ' + s + '초</b> · ' + target.toLocaleString('ko-KR');
     }
     tick();
     countdownTimer = setInterval(tick, 1000);
@@ -438,17 +481,19 @@ window.Api = {
 
   /* ---------- 이벤트 바인딩 ---------- */
 
-  function bind() {
+  function bind(canVote) {
     $$('.tab').forEach(function (t) {
       t.addEventListener('click', function () {
         state.tab = t.getAttribute('data-tab');
         render();
       });
     });
-    var banner = $('#banner');
-    if (banner) banner.addEventListener('click', function () { if (!state.data.isClosed) openModal(); });
-    var ov = $('#open-vote');
-    if (ov) ov.addEventListener('click', openModal);
+    if (canVote) {
+      var banner = $('#banner');
+      if (banner) banner.addEventListener('click', openModal);
+      var ov = $('#open-vote');
+      if (ov) ov.addEventListener('click', openModal);
+    }
   }
 
   /* ---------- 시작 ---------- */
