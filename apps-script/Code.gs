@@ -1,8 +1,10 @@
 /**
- * Code.gs — 리비 길드 레이드 스케줄러 백엔드 (Google Apps Script)
+ * Code.gs — 리비 길드 레이드 스케줄러 (HtmlService 내장앱 버전)
  *
- * 이 스크립트는 구글 시트에 붙여 "웹앱"으로 배포합니다.
- * 정적 사이트(GitHub Pages)가 이 웹앱 URL 로 데이터를 읽고/쓰기 합니다.
+ * 이 버전은 사이트(HTML)를 Apps Script 가 직접 띄웁니다.
+ * 정적 호스팅(GitHub Pages) 없이, 이 웹앱 URL(.../exec) 하나로 화면+데이터가 모두 동작합니다.
+ * → 배포 액세스를 "Google 계정이 있는 모든 사용자"로 해도 정상 작동합니다
+ *   (사이트가 google.script.run 으로 같은 도메인에서 호출하기 때문).
  *
  * ── 시트 구성 (탭 3개, 첫 행은 헤더) ──────────────────────────
  *  [길드원]  A:캐릭터명  B:클래스
@@ -11,10 +13,17 @@
  *            ※ [투표] 탭은 비어있어도 됩니다(스크립트가 헤더 자동 생성).
  *
  * ── 설치 ────────────────────────────────────────────────────
- *  1) 시트 메뉴 → 확장 프로그램 → Apps Script 에 이 코드 붙여넣기
- *  2) (권장) 프로젝트 설정에서 시간대를 'Asia/Seoul' 로 지정
- *  3) 배포 → 새 배포 → 유형:웹앱 → 실행:나 / 액세스:모든 사용자 → 배포
- *  4) 나온 웹앱 URL(.../exec)을 js/config.js 의 APPS_SCRIPT_URL 에 붙여넣기
+ *  1) 시트 메뉴 → 확장 프로그램 → Apps Script
+ *  2) 아래 파일들을 그대로 만들기 (이름 정확히):
+ *       - Code.gs        (이 파일)
+ *       - index.html     (HTML 파일)
+ *       - styles.html    (HTML 파일)
+ *       - js.html        (HTML 파일)
+ *     ※ HTML 파일 추가: 좌측 파일목록 + → HTML
+ *  3) (권장) 프로젝트 설정 → 시간대 'Asia/Seoul'
+ *  4) 배포 → 새 배포 → 유형:웹앱
+ *       실행:나 / 액세스:"Google 계정이 있는 모든 사용자" → 배포 → 권한 승인
+ *  5) 나온 웹앱 URL(.../exec)을 길드원에게 공유 (그 주소가 곧 사이트)
  */
 
 var SHEET_MEMBERS = '길드원';
@@ -22,25 +31,22 @@ var SHEET_CONFIG  = '설정';
 var SHEET_VOTES   = '투표';
 var TZ = 'Asia/Seoul';
 
-/* ───────── 진입점 ───────── */
+/* ───────── 화면 진입점 ───────── */
 
-function doGet(e) {
-  var action = (e && e.parameter && e.parameter.action) || 'getData';
-  if (action === 'getData') return json(getData());
-  return json({ ok: false, error: 'unknown action' });
+function doGet() {
+  return HtmlService.createTemplateFromFile('index')
+    .evaluate()
+    .setTitle('리비 길드 · 월요일 정기 콘텐츠')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1.0')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
 }
 
-function doPost(e) {
-  try {
-    var body = JSON.parse(e.postData.contents);
-    if (body.action === 'vote') return json(submitVote(body.payload));
-    return json({ ok: false, error: 'unknown action' });
-  } catch (err) {
-    return json({ ok: false, error: String(err) });
-  }
+/** index.html 안에서 <?!= include('styles') ?> 로 다른 파일을 끼워넣기 위한 헬퍼 */
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
 
-/* ───────── 핵심 로직 ───────── */
+/* ───────── 데이터 API (클라이언트에서 google.script.run 으로 호출) ───────── */
 
 function getData() {
   var cfg = readConfig();
@@ -181,10 +187,4 @@ function deadlineOf(monday, timeStr) {
 
 function fmt(d, pattern) {
   return Utilities.formatDate(d, TZ, pattern);
-}
-
-function json(obj) {
-  return ContentService
-    .createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
 }
