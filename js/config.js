@@ -9,7 +9,7 @@
  */
 window.CONFIG = {
   // 예) 'https://script.google.com/macros/s/AKfycb..../exec'
-  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbybEwb105z6SrrxSYZWpKymjygqpZlm8qhMBmVwTVvr1YIOIgxtA00hlrcC88OcQDvE/exec',
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbxVYxaYDNswbgdt1FHY5vZhpf-TrE_jO9-enJJdIvq-UX2C9B3MXmTQBzfDmOoW4l68/exec',
 
   // 길드 이름 / 콘텐츠 제목 (화면 표시용)
   GUILD_NAME: '리비 길드',
