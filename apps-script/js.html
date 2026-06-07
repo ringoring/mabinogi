@@ -134,7 +134,12 @@ window.Api = {
 
   var state = {
     data: null,        // Api.getData() 결과
-    tab: 'vote'        // 'vote' | 'party'
+    tab: 'vote',       // 'vote' | 'party'
+    admin: false,      // 관리자 인증 여부
+    adminKey: null,    // 관리자 비번 (저장 호출용)
+    editing: false,    // 관리자 편성 편집 중
+    draft: null,       // 편집 작업본 {parties:[[name]], waiting:[name]}
+    frozeTried: false  // 자동 동결 중복 호출 방지
   };
 
   var $ = function (sel, el) { return (el || document).querySelector(sel); };
@@ -191,7 +196,7 @@ window.Api = {
     var deadline = new Date(d.deadline);
     var notYetOpen = d.notYetOpen;
     var closed = d.isClosed;
-    var canVote = !notYetOpen && !closed;
+    var canVote = !notYetOpen;   // 마감 후에도 투표는 가능. 접수 시작 전만 막음
 
     var html = '';
     html += headerHTML(d, openAt, deadline, notYetOpen, closed, canVote);
@@ -206,10 +211,10 @@ window.Api = {
   }
 
   function headerHTML(d, openAt, deadline, notYetOpen, closed, canVote) {
-    var cta = notYetOpen ? '⏳ 접수 시작 전' : (closed ? '🔒 투표 마감' : '신청하기 / 투표 ▸');
+    var cta = notYetOpen ? '⏳ 접수 시작 전' : '신청하기 / 투표 ▸';
     var line = notYetOpen
       ? '접수 시작: ' + openAt.toLocaleString('ko-KR')
-      : (closed ? '투표가 마감되었습니다.' : '마감: ' + deadline.toLocaleString('ko-KR'));
+      : (closed ? '🔒 마감됨 · 추가 신청 가능 (팀 편성 고정)' : '마감: ' + deadline.toLocaleString('ko-KR'));
     return '' +
       '<header class="hero">' +
       '  <div class="hero-guild">' + esc(CONFIG.GUILD_NAME) + '</div>' +
@@ -254,7 +259,8 @@ window.Api = {
     if (notYetOpen) {
       cta = '<div class="card muted">아직 접수 시작 전입니다. 매주 월요일 접수 시작 시각에 신청할 수 있습니다.</div>';
     } else if (closed) {
-      cta = '<div class="card muted">투표가 마감되어 더 이상 신청할 수 없습니다. “파티 분배” 탭에서 결과를 확인하세요.</div>';
+      cta = '<div class="card"><p class="muted small" style="margin:0 0 10px;">마감 후 추가 신청입니다. 자동 팀 편성에는 반영되지 않으며, 관리자가 수동으로 배치합니다.</p>' +
+        '<button class="primary big" id="open-vote">＋ 내 캐릭터로 신청 / 투표</button></div>';
     } else {
       cta = '<div class="card"><button class="primary big" id="open-vote">＋ 내 캐릭터로 신청 / 투표</button></div>';
     }
@@ -285,9 +291,8 @@ window.Api = {
     var b = buckets();
     var html = '';
 
-    // 9시 정시(21:00 선택자) → 파티 자동 결성
-    html += '<div class="card"><h3>9시 정시 파티 <small>(' + b.onTime.length + '명)</small></h3>' +
-      partiesHTML(Party.buildParties(b.onTime, CONFIG.PARTY_SIZE)) + '</div>';
+    // 9시 정시(21:00 선택자) → 파티 편성 (저장본 우선 / 마감 후 동결 / 관리자 편집)
+    html += '<div class="card">' + onTimeSectionHTML(b) + '</div>';
 
     // 9시 이후 → 팀 결성 없이 리스트만 (이름/직업/전투력/시간)
     if (b.later.length) {
@@ -303,34 +308,149 @@ window.Api = {
     return html;
   }
 
-  function memberLi(m) {
-    return '<li><span class="dot ' + m.cat + '"></span>' +
-      '<span class="pname">' + esc(m.name) + '</span>' +
-      '<span class="cls ' + m.cat + '">' + esc(m.cls) + '</span>' +
-      '<span class="pw">' + esc(String(m.power)) + '</span></li>';
+  /* ----- 9시 정시 편성 ----- */
+
+  // 이름 → 표시용 인물 객체 (클래스/전투력/시간 보강)
+  function personOf(name) {
+    var d = state.data;
+    if (personOf._for !== d) {
+      var mm = {}; d.members.forEach(function (m) { mm[m.name] = m; });
+      var vv = {}; d.votes.forEach(function (v) { vv[v.name] = v; });
+      personOf._m = mm; personOf._v = vv; personOf._for = d;
+    }
+    var m = personOf._m[name], v = personOf._v[name];
+    var cls = m ? m.cls : '';
+    return {
+      name: name, cls: cls, cat: Party.categoryOf(cls),
+      power: v ? (Number(v.power) || 0) : 0,
+      time: v ? v.time : ''
+    };
   }
 
-  function partiesHTML(result) {
-    var parties = (result && result.parties) || [];
-    var waiting = (result && result.waiting) || [];
-    if (!parties.length) return '<p class="muted">아직 인원이 없습니다.</p>';
-    var html = '<div class="parties">' + parties.map(function (p, i) {
-      var hasTank = p.members.some(function (m) { return m.cat === 'tank'; });
-      var hasHeal = p.members.some(function (m) { return m.cat === 'heal'; });
+  // buildParties 결과 → 이름 배열 편성
+  function toAssignment(result) {
+    return {
+      parties: (result.parties || []).map(function (p) { return p.members.map(function (m) { return m.name; }); }),
+      waiting: (result.waiting || []).map(function (m) { return m.name; })
+    };
+  }
+
+  // 화면에 표시할 편성 결정 (편집중>저장본>마감동결>실시간)
+  function currentAssignment(b) {
+    var d = state.data;
+    if (state.editing && state.draft) return state.draft;
+    if (d.assignment) return d.assignment;
+    var built = toAssignment(Party.buildParties(b.onTime, CONFIG.PARTY_SIZE));
+    if (d.isClosed && !state.frozeTried) {   // 마감인데 저장본 없으면 1회 동결
+      state.frozeTried = true;
+      google.script.run
+        .withSuccessHandler(function () { load(); })
+        .withFailureHandler(function () {})
+        .freezeAssignment(d.contentDate, built);
+    }
+    return built;
+  }
+
+  function onTimeSectionHTML(b) {
+    var d = state.data;
+    var assign = currentAssignment(b);
+
+    var tag;
+    if (state.editing) tag = '<span class="warn">편집 중</span>';
+    else if (d.assignment) tag = '<span class="pill on">편성 확정</span>';
+    else if (d.isClosed) tag = '<span class="pill on">편성 고정</span>';
+    else tag = '<span class="muted small">실시간 미리보기</span>';
+
+    var html = '<h3>9시 정시 파티 <small>(' + b.onTime.length + '명)</small> ' + tag + '</h3>';
+    html += assignmentHTML(assign);
+    if (!state.editing) html += unassignedHTML(b, assign);
+    html += adminBarHTML();
+    return html;
+  }
+
+  function assignLi(m, from, numParties) {
+    var base = '<span class="dot ' + m.cat + '"></span>' +
+      '<span class="pname">' + esc(m.name) + '</span>' +
+      '<span class="cls ' + m.cat + '">' + esc(m.cls) + '</span>' +
+      '<span class="pw">' + esc(String(m.power)) + '</span>';
+    if (!state.editing) return '<li>' + base + '</li>';
+    var opts = '';
+    for (var i = 0; i < numParties; i++) {
+      opts += '<option value="p' + i + '"' + (from === 'p' + i ? ' selected' : '') + '>' + (i + 1) + '파티</option>';
+    }
+    opts += '<option value="wait"' + (from === 'wait' ? ' selected' : '') + '>대기</option>';
+    return '<li>' + base +
+      '<select class="move" data-name="' + esc(m.name) + '" data-from="' + from + '" ' +
+      'style="margin-left:8px;padding:4px;background:var(--bg2);color:var(--text);border:1px solid var(--line);border-radius:6px;">' +
+      opts + '</select></li>';
+  }
+
+  function assignmentHTML(assign) {
+    var parties = assign.parties || [];
+    var waiting = assign.waiting || [];
+    if (!parties.length && !waiting.length) return '<p class="muted">아직 인원이 없습니다.</p>';
+    var numParties = parties.length;
+
+    var html = '<div class="parties">' + parties.map(function (names, i) {
+      var members = names.map(personOf);
+      var total = members.reduce(function (a, m) { return a + m.power; }, 0);
+      var hasTank = members.some(function (m) { return m.cat === 'tank'; });
+      var hasHeal = members.some(function (m) { return m.cat === 'heal'; });
       var warn = (!hasTank || !hasHeal)
-        ? '<span class="warn">' + (!hasTank ? '탱 없음 ' : '') + (!hasHeal ? '힐 없음' : '') + '</span>'
-        : '';
-      return '<div class="party">' +
-        '<div class="party-head">' + (i + 1) + '파티 ' + warn +
-        '<span class="ptotal">전투력 ' + p.total.toLocaleString() + '</span></div>' +
-        '<ul class="party-list">' + p.members.map(memberLi).join('') + '</ul></div>';
+        ? '<span class="warn">' + (!hasTank ? '탱 없음 ' : '') + (!hasHeal ? '힐 없음' : '') + '</span>' : '';
+      var lis = members.map(function (m) { return assignLi(m, 'p' + i, numParties); }).join('');
+      return '<div class="party"><div class="party-head">' + (i + 1) + '파티 ' + warn +
+        '<span class="ptotal">전투력 ' + total.toLocaleString() + '</span></div>' +
+        '<ul class="party-list">' + lis + '</ul></div>';
     }).join('') + '</div>';
-    if (waiting.length) {
+
+    var wmembers = waiting.map(personOf);
+    if (wmembers.length || state.editing) {
+      var wlis = wmembers.map(function (m) { return assignLi(m, 'wait', numParties); }).join('') ||
+        '<li class="muted">없음</li>';
       html += '<div class="party" style="margin-top:12px;border-style:dashed;">' +
-        '<div class="party-head">⏳ 대기파티 <span class="ptotal">' + waiting.length + '명</span></div>' +
-        '<ul class="party-list">' + waiting.map(memberLi).join('') + '</ul></div>';
+        '<div class="party-head">⏳ 대기파티 <span class="ptotal">' + wmembers.length + '명</span></div>' +
+        '<ul class="party-list">' + wlis + '</ul></div>';
     }
     return html;
+  }
+
+  // 9시 정시 신청자 중 편성에 없는 사람(마감 후 추가 신청 등)
+  function unassignedHTML(b, assign) {
+    var inAssign = {};
+    (assign.parties || []).forEach(function (names) { names.forEach(function (n) { inAssign[n] = 1; }); });
+    (assign.waiting || []).forEach(function (n) { inAssign[n] = 1; });
+    var extras = b.onTime.filter(function (p) { return !inAssign[p.name]; });
+    if (!extras.length) return '';
+    var lis = extras.map(function (p) {
+      var m = { name: p.name, cls: p.cls, cat: Party.categoryOf(p.cls), power: Number(p.power) || 0 };
+      return '<li><span class="dot ' + m.cat + '"></span><span class="pname">' + esc(m.name) +
+        '</span><span class="cls ' + m.cat + '">' + esc(m.cls) + '</span><span class="pw">' +
+        esc(String(m.power)) + '</span></li>';
+    }).join('');
+    return '<div style="margin-top:12px;">' +
+      '<h4 style="color:var(--accent2);margin:0 0 8px;">추가 신청 · 미배정 <small>(' + extras.length + ')</small></h4>' +
+      '<ul class="party-list">' + lis + '</ul>' +
+      (state.admin ? '<p class="muted small" style="margin-top:6px;">“수동 편성”에서 배치할 수 있습니다.</p>' : '') +
+      '</div>';
+  }
+
+  function adminBarHTML() {
+    var d = state.data;
+    if (!d.adminEnabled) return '';
+    if (!state.admin) {
+      return '<div style="margin-top:14px;text-align:right;">' +
+        '<button class="tab" id="admin-login" style="flex:none;padding:8px 14px;">🔧 관리자</button></div>';
+    }
+    if (state.editing) {
+      return '<div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">' +
+        '<button class="tab" id="admin-cancel" style="flex:none;padding:8px 14px;">취소</button>' +
+        '<button class="primary" id="admin-save" style="padding:8px 16px;">💾 편성 저장</button></div>';
+    }
+    return '<div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">' +
+      '<button class="tab" id="admin-reset" style="flex:none;padding:8px 14px;">↩️ 초기화</button>' +
+      '<button class="tab" id="admin-auto" style="flex:none;padding:8px 14px;">🔄 자동 재편성</button>' +
+      '<button class="primary" id="admin-edit" style="padding:8px 16px;">✏️ 수동 편성</button></div>';
   }
 
   function laterListHTML(arr) {
@@ -483,6 +603,7 @@ window.Api = {
 
   function bind(canVote) {
     $$('.tab').forEach(function (t) {
+      if (!t.getAttribute('data-tab')) return;   // 관리자 버튼(.tab)은 제외
       t.addEventListener('click', function () {
         state.tab = t.getAttribute('data-tab');
         render();
@@ -494,6 +615,87 @@ window.Api = {
       var ov = $('#open-vote');
       if (ov) ov.addEventListener('click', openModal);
     }
+    // 관리자 버튼들
+    var al = $('#admin-login'); if (al) al.addEventListener('click', adminLogin);
+    var ae = $('#admin-edit');  if (ae) ae.addEventListener('click', startEditing);
+    var aa = $('#admin-auto');  if (aa) aa.addEventListener('click', adminAuto);
+    var ar = $('#admin-reset'); if (ar) ar.addEventListener('click', adminReset);
+    var ac = $('#admin-cancel'); if (ac) ac.addEventListener('click', function () { state.editing = false; state.draft = null; render(); });
+    var as = $('#admin-save');  if (as) as.addEventListener('click', adminSave);
+    $$('.move').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        moveMember(sel.getAttribute('data-name'), sel.getAttribute('data-from'), sel.value);
+      });
+    });
+  }
+
+  /* ---------- 관리자 ---------- */
+
+  function adminLogin() {
+    var key = window.prompt('관리자 비밀번호를 입력하세요');
+    if (key == null) return;
+    google.script.run.withSuccessHandler(function (ok) {
+      if (ok) { state.admin = true; state.adminKey = key; render(); }
+      else window.alert('비밀번호가 올바르지 않습니다.');
+    }).withFailureHandler(function (e) { window.alert('오류: ' + (e.message || e)); }).verifyAdmin(key);
+  }
+
+  function startEditing() {
+    var b = buckets();
+    var cur = currentAssignment(b);
+    var draft = {
+      parties: (cur.parties || []).map(function (a) { return a.slice(); }),
+      waiting: (cur.waiting || []).slice()
+    };
+    var inAssign = {};
+    draft.parties.forEach(function (names) { names.forEach(function (n) { inAssign[n] = 1; }); });
+    draft.waiting.forEach(function (n) { inAssign[n] = 1; });
+    b.onTime.forEach(function (p) { if (!inAssign[p.name]) draft.waiting.push(p.name); });
+    state.draft = draft;
+    state.editing = true;
+    render();
+  }
+
+  function moveMember(name, from, to) {
+    if (!state.draft) return;
+    function rm(arr) { if (!arr) return; var i = arr.indexOf(name); if (i !== -1) arr.splice(i, 1); }
+    if (from === 'wait') rm(state.draft.waiting);
+    else if (from.charAt(0) === 'p') rm(state.draft.parties[parseInt(from.slice(1), 10)]);
+    else { state.draft.parties.forEach(rm); rm(state.draft.waiting); }
+    if (to === 'wait') state.draft.waiting.push(name);
+    else if (to.charAt(0) === 'p') {
+      var idx = parseInt(to.slice(1), 10);
+      if (!state.draft.parties[idx]) state.draft.parties[idx] = [];
+      state.draft.parties[idx].push(name);
+    }
+    render();
+  }
+
+  function adminAuto() {
+    if (!window.confirm('현재 9시 정시 신청자로 팀을 자동 재편성하고 저장할까요?')) return;
+    var b = buckets();
+    saveAssignment(toAssignment(Party.buildParties(b.onTime, CONFIG.PARTY_SIZE)));
+  }
+
+  function adminReset() {
+    if (!window.confirm('저장된 편성을 삭제하고 자동/실시간 편성으로 되돌릴까요?')) return;
+    google.script.run.withSuccessHandler(function (res) {
+      if (res && res.ok) { state.frozeTried = false; load(); }
+      else window.alert((res && res.error) || '실패');
+    }).withFailureHandler(function (e) { window.alert('오류: ' + (e.message || e)); })
+      .adminResetAssignment(state.data.contentDate, state.adminKey);
+  }
+
+  function adminSave() {
+    if (state.draft) saveAssignment(state.draft);
+  }
+
+  function saveAssignment(assignment) {
+    google.script.run.withSuccessHandler(function (res) {
+      if (res && res.ok) { state.editing = false; state.draft = null; load(); }
+      else window.alert((res && res.error) || '저장 실패');
+    }).withFailureHandler(function (e) { window.alert('오류: ' + (e.message || e)); })
+      .adminSaveAssignment(state.data.contentDate, assignment, state.adminKey);
   }
 
   /* ---------- 시작 ---------- */

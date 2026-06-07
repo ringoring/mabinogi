@@ -29,6 +29,7 @@
 var SHEET_MEMBERS = '길드원';
 var SHEET_CONFIG  = '설정';
 var SHEET_VOTES   = '투표';
+var SHEET_ASSIGN  = '편성';
 var TZ = 'Asia/Seoul';
 
 /* ───────── 화면 진입점 ───────── */
@@ -62,9 +63,11 @@ function getData() {
     openAt: openAt.toISOString(),
     deadline: deadline.toISOString(),
     notYetOpen: test ? false : (now < openAt),   // 접수 시작 전
-    isClosed: test ? false : (now > deadline),   // 접수 마감 후
+    isClosed: test ? false : (now > deadline),   // 마감(이후 팀 고정). 마감 후에도 투표는 가능
     testMode: test,
     defaultTime: cfg.기본시간 || '21:00',
+    assignment: readAssignment(weekId),          // 저장(동결)된 팀 편성 (없으면 null)
+    adminEnabled: String(cfg.관리자키 || '').trim().length > 0,
     members: readMembers(),
     votes: readVotes(weekId)
   };
@@ -77,13 +80,9 @@ function submitVote(p) {
   var monday = upcomingMonday();
   var weekId = fmt(monday, 'yyyy-MM-dd');
   var now = new Date();
-  if (!isOn(cfg.테스트모드)) {   // 테스트모드면 시간제한 건너뜀
-    if (now < atTime(monday, cfg.시작시간)) {
-      return { ok: false, error: '아직 접수 시작 전입니다.' };
-    }
-    if (now > atTime(monday, cfg.마감시간)) {
-      return { ok: false, error: '투표가 마감되었습니다.' };
-    }
+  // 마감 후에도 투표는 가능. 접수 시작 전만 차단 (테스트모드면 모두 허용)
+  if (!isOn(cfg.테스트모드) && now < atTime(monday, cfg.시작시간)) {
+    return { ok: false, error: '아직 접수 시작 전입니다.' };
   }
 
   var member = readMembers().filter(function (m) { return m.name === p.name; })[0];
@@ -135,7 +134,7 @@ function readMembers() {
 
 function readConfig() {
   var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_CONFIG);
-  var cfg = { 기본시간: '21:00', 시작시간: '08:00', 마감시간: '20:30' };
+  var cfg = { 기본시간: '21:00', 시작시간: '08:00', 마감시간: '20:30', 관리자키: '' };
   if (!sh) return cfg;
   var v = sh.getDataRange().getValues();
   for (var i = 1; i < v.length; i++) {
@@ -179,6 +178,84 @@ function ensureVotesSheet() {
     sh.appendRow(['주차', '캐릭터명', '참석여부', '시간', '전투력', '업데이트시각']);
   }
   return sh;
+}
+
+/* ───────── 팀 편성 저장/동결 + 관리자 ───────── */
+
+function ensureAssignSheet() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(SHEET_ASSIGN);
+  if (!sh) {
+    sh = ss.insertSheet(SHEET_ASSIGN);
+    sh.appendRow(['주차', '데이터(JSON)']);
+  } else if (sh.getLastRow() === 0) {
+    sh.appendRow(['주차', '데이터(JSON)']);
+  }
+  return sh;
+}
+
+function readAssignment(weekId) {
+  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_ASSIGN);
+  if (!sh) return null;
+  var v = sh.getDataRange().getValues();
+  for (var i = 1; i < v.length; i++) {
+    if (asWeek(v[i][0]) === weekId) {
+      try { return JSON.parse(v[i][1]); } catch (e) { return null; }
+    }
+  }
+  return null;
+}
+
+function writeAssignment_(weekId, assignment) {
+  var sh = ensureAssignSheet();
+  var v = sh.getDataRange().getValues();
+  var json = JSON.stringify(assignment);
+  for (var i = 1; i < v.length; i++) {
+    if (asWeek(v[i][0]) === weekId) {
+      sh.getRange(i + 1, 2).setValue(json);
+      return;
+    }
+  }
+  sh.appendRow([weekId, json]);
+}
+
+// 마감 직후 자동 동결: 해당 주차 편성이 아직 없을 때만 1회 저장
+function freezeAssignment(weekId, assignment) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    if (readAssignment(weekId)) return { ok: true, already: true };
+    writeAssignment_(weekId, assignment);
+    return { ok: true };
+  } finally { lock.releaseLock(); }
+}
+
+// 관리자 수동 저장 (덮어쓰기)
+function adminSaveAssignment(weekId, assignment, key) {
+  if (!verifyAdmin(key)) return { ok: false, error: '관리자 인증 실패' };
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    writeAssignment_(weekId, assignment);
+    return { ok: true };
+  } finally { lock.releaseLock(); }
+}
+
+// 관리자 편성 초기화 (저장 삭제 → 실시간/자동 편성으로 복귀)
+function adminResetAssignment(weekId, key) {
+  if (!verifyAdmin(key)) return { ok: false, error: '관리자 인증 실패' };
+  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_ASSIGN);
+  if (!sh) return { ok: true };
+  var v = sh.getDataRange().getValues();
+  for (var i = v.length - 1; i >= 1; i--) {
+    if (asWeek(v[i][0]) === weekId) sh.deleteRow(i + 1);
+  }
+  return { ok: true };
+}
+
+function verifyAdmin(key) {
+  var real = String(readConfig().관리자키 || '').trim();
+  return real.length > 0 && String(key == null ? '' : key).trim() === real;
 }
 
 /* ───────── 날짜 유틸 ───────── */
